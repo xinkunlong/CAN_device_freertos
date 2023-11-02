@@ -29,8 +29,6 @@
  extern "C" {
 #endif
 
-#define USE_FREERTOS 1u
-
 #ifndef USE_FREERTOS
 #define SLCAN_TX_FIFO_NUM 10u
 #endif

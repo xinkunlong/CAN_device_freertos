@@ -25,6 +25,7 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 #include "slcan.h"
+#include "cli_setup.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,10 +62,24 @@ const osThreadAttr_t pc_slcan_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
-/* Definitions for slcan_bus */
-osThreadId_t slcan_busHandle;
-const osThreadAttr_t slcan_bus_attributes = {
-  .name = "slcan_bus",
+/* Definitions for can_info_to_pc */
+osThreadId_t can_info_to_pcHandle;
+const osThreadAttr_t can_info_to_pc_attributes = {
+  .name = "can_info_to_pc",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for Task_Cli */
+osThreadId_t Task_CliHandle;
+const osThreadAttr_t Task_Cli_attributes = {
+  .name = "Task_Cli",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for can_info_to_bus */
+osThreadId_t can_info_to_busHandle;
+const osThreadAttr_t can_info_to_bus_attributes = {
+  .name = "can_info_to_bus",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
@@ -93,6 +108,16 @@ osMutexId_t can_mutexHandle;
 const osMutexAttr_t can_mutex_attributes = {
   .name = "can_mutex"
 };
+/* Definitions for uart_mutex */
+osMutexId_t uart_mutexHandle;
+const osMutexAttr_t uart_mutex_attributes = {
+  .name = "uart_mutex"
+};
+/* Definitions for Cli_event */
+osEventFlagsId_t Cli_eventHandle;
+const osEventFlagsAttr_t Cli_event_attributes = {
+  .name = "Cli_event"
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -104,7 +129,9 @@ static void MX_USART3_UART_Init(void);
 static void MX_CAN1_Init(void);
 void StartDefaultTask(void *argument);
 void Task_CDC_process_pc_slcan(void *argument);
-void Task_CDC_process_slcan_bus(void *argument);
+void Task_CDC_process_slcan_pc(void *argument);
+void Task_CLi_process(void *argument);
+void Task_CDC_process_pc_bus(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -124,6 +151,9 @@ int main(void)
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
+
+  /* Enable I-Cache---------------------------------------------------------*/
+  SCB_EnableICache();
 
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -146,7 +176,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
-
+  setupCli();
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -157,6 +187,9 @@ int main(void)
 
   /* creation of can_mutex */
   can_mutexHandle = osMutexNew(&can_mutex_attributes);
+
+  /* creation of uart_mutex */
+  uart_mutexHandle = osMutexNew(&uart_mutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -191,12 +224,21 @@ int main(void)
   /* creation of pc_slcan */
   pc_slcanHandle = osThreadNew(Task_CDC_process_pc_slcan, NULL, &pc_slcan_attributes);
 
-  /* creation of slcan_bus */
-  slcan_busHandle = osThreadNew(Task_CDC_process_slcan_bus, NULL, &slcan_bus_attributes);
+  /* creation of can_info_to_pc */
+  can_info_to_pcHandle = osThreadNew(Task_CDC_process_slcan_pc, NULL, &can_info_to_pc_attributes);
+
+  /* creation of Task_Cli */
+  Task_CliHandle = osThreadNew(Task_CLi_process, NULL, &Task_Cli_attributes);
+
+  /* creation of can_info_to_bus */
+  can_info_to_busHandle = osThreadNew(Task_CDC_process_pc_bus, NULL, &can_info_to_bus_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
+
+  /* creation of Cli_event */
+  Cli_eventHandle = osEventFlagsNew(&Cli_event_attributes);
 
   /* USER CODE BEGIN RTOS_EVENTS */
   /* add events, ... */
@@ -449,7 +491,7 @@ void Task_CDC_process_pc_slcan(void *argument)
   /* Infinite loop */
   for(;;)
   {
-      os_status = osMessageQueueGet( pc_info_to_slcan_qHandle, pc_tx_info_data, NULL, 0u );
+      os_status = osMessageQueueGet( pc_info_to_slcan_qHandle, pc_tx_info_data, NULL, osWaitForever );
       if( osOK == os_status )
       {
           char cmd = pc_tx_info_data[0];
@@ -459,25 +501,22 @@ void Task_CDC_process_pc_slcan(void *argument)
   /* USER CODE END Task_CDC_process_pc_slcan */
 }
 
-/* USER CODE BEGIN Header_Task_CDC_process_slcan_bus */
+/* USER CODE BEGIN Header_Task_CDC_process_slcan_pc */
 /**
-* @brief Function implementing the slcan_bus thread.
+* @brief Function implementing the can_info_to_pc thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_Task_CDC_process_slcan_bus */
-void Task_CDC_process_slcan_bus(void *argument)
+/* USER CODE END Header_Task_CDC_process_slcan_pc */
+void Task_CDC_process_slcan_pc(void *argument)
 {
-  /* USER CODE BEGIN Task_CDC_process_slcan_bus */
+  /* USER CODE BEGIN Task_CDC_process_slcan_pc */
     osStatus_t os_status;
     slcan_str_info_packets_t slcan_tx_info_to_pc;
-    slcan_byte_packets_t slcan_byte_packets;
-    CAN_TxHeaderTypeDef CAN_TxHeader;
-    uint32_t tx_mailbox;
   /* Infinite loop */
   for(;;)
   {
-      os_status = osMessageQueueGet( slcan_info_to_pc_qHandle, &slcan_tx_info_to_pc, NULL, 0u );
+      os_status = osMessageQueueGet( slcan_info_to_pc_qHandle, &slcan_tx_info_to_pc, NULL, osWaitForever );
       if( osOK == os_status )
       {
 #ifdef USE_FREERTOS
@@ -488,20 +527,64 @@ void Task_CDC_process_slcan_bus(void *argument)
         osMutexRelease( uds_mutexHandle );
 #endif
       }
-        os_status = osMessageQueueGet( can_info_to_pc_qHandle, &slcan_byte_packets, NULL, 0u );
-        if( osOK == os_status )
-        {
-        	CAN_TxHeader = slcan_byte_packets.CAN_TxHeader;
+  }
+  /* USER CODE END Task_CDC_process_slcan_pc */
+}
+
+/* USER CODE BEGIN Header_Task_CLi_process */
+/**
+* @brief Function implementing the Task_Cli thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Task_CLi_process */
+void Task_CLi_process(void *argument)
+{
+  /* USER CODE BEGIN Task_CLi_process */
+    EmbeddedCli *cli = getCliPointer();
+  /* Infinite loop */
+  for(;;)
+  {
+	if ( UART_EVENT_READY == osEventFlagsWait(Cli_eventHandle, UART_EVENT_READY, osFlagsWaitAll, osWaitForever))
+	{
+		embeddedCliProcess( cli  );
+	}
+
+  }
+  /* USER CODE END Task_CLi_process */
+}
+
+/* USER CODE BEGIN Header_Task_CDC_process_pc_bus */
+/**
+* @brief Function implementing the can_info_to_bus thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Task_CDC_process_pc_bus */
+void Task_CDC_process_pc_bus(void *argument)
+{
+  /* USER CODE BEGIN Task_CDC_process_pc_bus */
+    slcan_byte_packets_t slcan_byte_packets;
+    CAN_TxHeaderTypeDef CAN_TxHeader;
+    uint32_t tx_mailbox;
+    osStatus_t os_status;
+  /* Infinite loop */
+  for(;;)
+  {
+	os_status = osMessageQueueGet( can_info_to_pc_qHandle, &slcan_byte_packets, NULL, osWaitForever );
+	if( osOK == os_status )
+	{
+		CAN_TxHeader = slcan_byte_packets.CAN_TxHeader;
 #ifdef USE_FREERTOS
-          osMutexAcquire( can_mutexHandle, osWaitForever );
+	  osMutexAcquire( can_mutexHandle, osWaitForever );
 #endif
-          (void)HAL_CAN_AddTxMessage(&hcan1, &CAN_TxHeader, slcan_byte_packets.can_data, &tx_mailbox);
+	  (void)HAL_CAN_AddTxMessage(&hcan1, &CAN_TxHeader, slcan_byte_packets.can_data, &tx_mailbox);
 #ifdef USE_FREERTOS
-          osMutexRelease( can_mutexHandle );
+	  osMutexRelease( can_mutexHandle );
 #endif
       }
   }
-  /* USER CODE END Task_CDC_process_slcan_bus */
+  /* USER CODE END Task_CDC_process_pc_bus */
 }
 
 /**
